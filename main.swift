@@ -3,18 +3,34 @@ import Carbon
 import Vision
 
 let saveDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop")
+let captureDir = FileManager.default.temporaryDirectory.appendingPathComponent("snip-\(UUID().uuidString)", isDirectory: true)
 
-func newPath(_ ext: String) -> String {
-    let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-    return saveDir.appendingPathComponent("Screenshot \(f.string(from: Date())).\(ext)").path
+func temporaryCapturePath() throws -> String {
+    try FileManager.default.createDirectory(at: captureDir, withIntermediateDirectories: true)
+    return captureDir.appendingPathComponent("Screenshot-\(UUID().uuidString).png").path
 }
 
-func screencapture(_ args: [String], then: @escaping () -> Void = {}) {
+func newPath(_ ext: String) -> String {
+    let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss.SSS"
+    let name = "Screenshot \(f.string(from: Date()))"
+    var url = saveDir.appendingPathComponent("\(name).\(ext)")
+    var suffix = 2
+    while FileManager.default.fileExists(atPath: url.path) {
+        url = saveDir.appendingPathComponent("\(name) (\(suffix)).\(ext)")
+        suffix += 1
+    }
+    return url.path
+}
+
+func screencapture(_ args: [String], then: @escaping (Bool) -> Void = { _ in }) {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
     p.arguments = args
-    p.terminationHandler = { p in if p.terminationStatus == 0 { DispatchQueue.main.async(execute: then) } }
-    try? p.run()
+    p.terminationHandler = { p in
+        let succeeded = p.terminationStatus == 0
+        DispatchQueue.main.async { then(succeeded) }
+    }
+    do { try p.run() } catch { then(false) }
 }
 
 func copyToClipboard(_ items: [NSPasteboardWriting]) {
@@ -22,12 +38,19 @@ func copyToClipboard(_ items: [NSPasteboardWriting]) {
     NSPasteboard.general.writeObjects(items)
 }
 
-final class PinView: NSImageView {
-    override func mouseDown(with e: NSEvent) { if e.clickCount == 2 { window?.close() } }
-}
-
 final class DragView: NSImageView, NSDraggingSource {
     var fileURL: URL!
+    // Crop only the thumbnail; all actions use the original full-resolution image.
+    override func draw(_ dirtyRect: NSRect) {
+        guard let image, image.size.width > 0, image.size.height > 0 else { return }
+        let scale = max(bounds.width / image.size.width, bounds.height / image.size.height)
+        let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
+        let destination = NSRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2, width: size.width, height: size.height)
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: bounds).addClip()
+        image.draw(in: destination, from: .zero, operation: .sourceOver, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+    }
     override func mouseDragged(with e: NSEvent) {
         let item = NSDraggingItem(pasteboardWriter: fileURL as NSURL)
         item.setDraggingFrame(bounds, contents: image)
@@ -35,6 +58,13 @@ final class DragView: NSImageView, NSDraggingSource {
     }
     override func mouseUp(with e: NSEvent) { if e.clickCount == 2 { (window as? Preview)?.annotate() } }
     func draggingSession(_ s: NSDraggingSession, sourceOperationMaskFor c: NSDraggingContext) -> NSDragOperation { .copy }
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        guard !operation.isEmpty, let preview = window as? Preview else { return }
+        // Receivers can read a dropped file after the session ends. Keep its temporary
+        // source until app termination, without creating an automatic Desktop copy.
+        preview.retainTemporaryFile = true
+        preview.dismiss()
+    }
 }
 
 final class Preview: NSPanel {
@@ -42,6 +72,8 @@ final class Preview: NSPanel {
     let file: String
     let img: NSImage
     let row: NSStackView
+    var retainTemporaryFile = false
+    private var isDismissing = false
 
     static func layout() {
         let screen = NSScreen.main!.visibleFrame
@@ -58,15 +90,15 @@ final class Preview: NSPanel {
 
     init(file: String, image: NSImage) {
         self.file = file; self.img = image
-        let w: CGFloat = 200
-        let h = min(160, w * image.size.height / image.size.width)
-        row = NSStackView(frame: NSRect(x: 8, y: 8, width: w - 16, height: 28))
+        let w: CGFloat = 240
+        let h = w * 3 / 4
+        row = NSStackView(frame: NSRect(x: 8, y: 8, width: w - 16, height: 36))
         let screen = NSScreen.main!.visibleFrame
         super.init(contentRect: NSRect(x: screen.minX - w, y: screen.minY + 16, width: w, height: h), styleMask: [.nonactivatingPanel, .borderless], backing: .buffered, defer: false)
         level = .floating
         collectionBehavior = .canJoinAllSpaces
         isReleasedWhenClosed = false
-        isMovableByWindowBackground = true
+        isMovableByWindowBackground = false
         backgroundColor = .clear
         isOpaque = false
 
@@ -80,15 +112,24 @@ final class Preview: NSPanel {
 
         row.distribution = .fillEqually
         row.wantsLayer = true
-        row.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.6).cgColor
+        row.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.85).cgColor
         row.layer?.cornerRadius = 6
         row.alphaValue = 0
-        for (sym, sel): (String, Selector) in [
-            ("xmark", #selector(dismiss)), ("doc.on.doc", #selector(copyImage)), ("pencil.tip.crop.circle", #selector(annotate)),
-            ("pin", #selector(pinIt)), ("trash", #selector(trash)),
+        for (icon, label, sel): (String, String, Selector) in [
+            ("Copy01Icon", "Copy image", #selector(copyImage)),
+            ("Download04Icon", "Save to Desktop", #selector(save)),
+            ("Edit02Icon", "Annotate in Preview", #selector(annotate)),
+            ("Cancel01Icon", "Delete screenshot", #selector(dismiss)),
         ] {
-            let b = NSButton(image: NSImage(systemSymbolName: sym, accessibilityDescription: nil)!, target: self, action: sel)
+            let url = Bundle.main.url(forResource: icon, withExtension: "svg", subdirectory: "hugeicons")!
+            let image = NSImage(contentsOf: url)!
+            image.size = NSSize(width: 20, height: 20)
+            image.isTemplate = true
+            let b = NSButton(image: image, target: self, action: sel)
             b.bezelStyle = .accessoryBarAction; b.isBordered = false; b.contentTintColor = .white
+            b.toolTip = label
+            b.setAccessibilityLabel(label)
+            b.heightAnchor.constraint(equalToConstant: 36).isActive = true
             row.addArrangedSubview(b)
         }
         thumb.addSubview(row)
@@ -102,6 +143,9 @@ final class Preview: NSPanel {
     override func mouseExited(with e: NSEvent) { row.animator().alphaValue = 0 }
 
     @objc func dismiss() {
+        guard !isDismissing else { return }
+        isDismissing = true
+        if !retainTemporaryFile { try? FileManager.default.removeItem(atPath: file) }
         Preview.all.removeAll { $0 === self }
         Preview.layout()
         NSAnimationContext.runAnimationGroup({ ctx in
@@ -111,26 +155,46 @@ final class Preview: NSPanel {
         }) { self.close() }
     }
     @objc func copyImage() { copyToClipboard([img]); dismiss() }
-    @objc func annotate() {
-        NSWorkspace.shared.open([URL(fileURLWithPath: file)], withApplicationAt: URL(fileURLWithPath: "/System/Applications/Preview.app"), configuration: NSWorkspace.OpenConfiguration())
-        dismiss()
+    @objc func save() {
+        do {
+            try FileManager.default.copyItem(atPath: file, toPath: newPath("png"))
+            dismiss()
+        } catch { NSApp.presentError(error) }
     }
-    @objc func pinIt() { snip.showPin(img); dismiss() }
-    @objc func trash() {
-        try? FileManager.default.trashItem(at: URL(fileURLWithPath: file), resultingItemURL: nil)
-        dismiss()
+    @objc func annotate() {
+        // Preview owns the editing lifetime, which can outlive snip. Hand it a
+        // separate temporary copy that macOS can eventually purge.
+        let editingURL = FileManager.default.temporaryDirectory.appendingPathComponent("snip-edit-\(UUID().uuidString).png")
+        do {
+            try FileManager.default.copyItem(at: URL(fileURLWithPath: file), to: editingURL)
+            NSWorkspace.shared.open([editingURL], withApplicationAt: URL(fileURLWithPath: "/System/Applications/Preview.app"), configuration: NSWorkspace.OpenConfiguration()) { _, error in
+                DispatchQueue.main.async {
+                    if let error {
+                        try? FileManager.default.removeItem(at: editingURL)
+                        NSApp.presentError(error)
+                    } else { self.dismiss() }
+                }
+            }
+        } catch { NSApp.presentError(error) }
     }
 }
 
-final class Snip: NSObject {
+final class Snip: NSObject, NSApplicationDelegate {
+    func applicationWillTerminate(_ notification: Notification) {
+        try? FileManager.default.removeItem(at: captureDir)
+    }
     @objc func area() { capture(["-i"]) }
     @objc func fullscreen() { capture([]) }
     @objc func timed() { capture(["-T", "5"]) }
 
     func capture(_ flags: [String]) {
-        let file = newPath("png")
-        screencapture(flags + [file]) {
-            guard let img = NSImage(contentsOfFile: file) else { return }
+        let file: String
+        do { file = try temporaryCapturePath() } catch { NSApp.presentError(error); return }
+        screencapture(flags + [file]) { succeeded in
+            guard succeeded, let img = NSImage(contentsOfFile: file) else {
+                try? FileManager.default.removeItem(atPath: file)
+                return
+            }
             copyToClipboard([img])
             _ = Preview(file: file, image: img)
         }
@@ -139,8 +203,12 @@ final class Snip: NSObject {
     @objc func record() { screencapture(["-i", "-J", "video", newPath("mov")]) }
 
     func captureTemp(_ then: @escaping (NSImage) -> Void) {
-        let tmp = NSTemporaryDirectory() + "snip-\(Date().timeIntervalSince1970).png"
-        screencapture(["-i", "-x", tmp]) { if let img = NSImage(contentsOfFile: tmp) { then(img) } }
+        let tmp: String
+        do { tmp = try temporaryCapturePath() } catch { NSApp.presentError(error); return }
+        screencapture(["-i", "-x", tmp]) { succeeded in
+            defer { try? FileManager.default.removeItem(atPath: tmp) }
+            if succeeded, let img = NSImage(contentsOfFile: tmp) { then(img) }
+        }
     }
 
     @objc func ocr() {
@@ -154,21 +222,6 @@ final class Snip: NSObject {
             req.recognitionLevel = .accurate
             try? VNImageRequestHandler(cgImage: cg).perform([req])
         }
-    }
-
-    @objc func pin() { captureTemp(showPin) }
-
-    func showPin(_ img: NSImage) {
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
-        let size = NSSize(width: img.size.width / scale, height: img.size.height / scale)
-        let w = NSWindow(contentRect: NSRect(origin: NSEvent.mouseLocation, size: size), styleMask: .borderless, backing: .buffered, defer: false)
-        let v = PinView(frame: NSRect(origin: .zero, size: size))
-        v.image = img
-        w.contentView = v
-        w.level = .floating
-        w.isMovableByWindowBackground = true
-        w.isReleasedWhenClosed = false
-        w.makeKeyAndOrderFront(nil)
     }
 
     @objc func annotate() { Preview.all.last?.annotate() }
@@ -202,7 +255,6 @@ let items: [(String, Selector, String, Int?)] = [
     ("Capture After 5s", #selector(Snip.timed), "6", kVK_ANSI_6),
     ("Record Screen", #selector(Snip.record), "5", kVK_ANSI_5),
     ("Capture Text (OCR)", #selector(Snip.ocr), "2", kVK_ANSI_2),
-    ("Pin Screenshot", #selector(Snip.pin), "p", kVK_ANSI_P),
     ("Annotate Last Screenshot", #selector(Snip.annotate), "a", kVK_ANSI_A),
     ("Toggle Desktop Icons", #selector(Snip.toggleDesktop), "d", kVK_ANSI_D),
     ("Quit snip", #selector(Snip.quit), "", nil),
@@ -218,6 +270,7 @@ for (i, (title, sel, key, code)) in items.enumerated() {
 }
 
 let app = NSApplication.shared
+app.delegate = snip
 app.setActivationPolicy(.accessory)
 let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 let icon = NSImage(contentsOf: Bundle.main.url(forResource: "icon", withExtension: "svg")!)!
