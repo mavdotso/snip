@@ -28,6 +28,15 @@ temporary capture. Dropped files remain available until snip quits so receiving
 apps can finish reading them. Annotation uses a separate temporary editing copy.
 Screen recordings continue to save to Desktop.
 
+Press ⇧⌘5 (or choose Record Screen) to open the recording controls, select
+an area, and start recording. Stop with the recording control in the menu bar.
+snip requests both system audio and the default microphone, and saves a `.mov`
+on Desktop. Allow Screen & System Audio Recording and Microphone access when
+macOS asks. Choose your microphone in System Settings → Sound → Input.
+Recording errors are displayed by macOS; Escape cancels the selection.
+System audio capture requires a macOS version whose `screencapture` supports
+`-A` (available on macOS 27); older versions may reject that option.
+
 Turn off the system screenshot shortcuts first: System Settings → Keyboard →
 Keyboard Shortcuts → Screenshots. snip uses the same keys.
 
@@ -54,6 +63,7 @@ switching from an ad-hoc build to a certificate-signed build.
 ```sh
 ./build.sh            # -> build/snip.app
 ./tests/run.sh        # native preview and temporary-file checks
+./tests/recording.sh  # recording command and lifecycle checks
 swift make-icon.swift # -> AppIcon.icns, after a change to icon.svg
 ```
 

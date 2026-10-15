@@ -28,9 +28,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>LSUIElement</key><true/>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSMicrophoneUsageDescription</key><string>Record your voice alongside screen video and system audio.</string>
 </dict></plist>
 PLIST
-codesign -f --options runtime -s "${ID:--}" "$APP"
+codesign -f --options runtime --entitlements entitlements.plist -s "${ID:--}" "$APP"
 codesign --verify --deep --strict "$APP"
 echo "built $APP, signed '${ID:-ad-hoc}'"
 if [ "${1:-}" = "--install" ]; then

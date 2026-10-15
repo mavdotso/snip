@@ -200,7 +200,16 @@ final class Snip: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc func record() { screencapture(["-i", "-J", "video", newPath("mov")]) }
+    private var recording = false
+    @objc func record() {
+        guard !recording else { return }
+        recording = true
+        // -J selects the initial UI; -v actually requests video. Request both
+        // audio sources explicitly rather than inheriting Screenshot settings.
+        screencapture(["-i", "-v", "-J", "video", "-U", "-g", "-A", "-d", newPath("mov")]) { [weak self] _ in
+            self?.recording = false
+        }
+    }
 
     func captureTemp(_ then: @escaping (NSImage) -> Void) {
         let tmp: String
